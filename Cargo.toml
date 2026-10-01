@@ -25,6 +25,9 @@ features = [
   "PointerEvent",
   "WheelEvent",
   "DomRect",
+  "Blob",
+  "Url",
+  "HtmlAnchorElement",
 ]
 
 [profile.release]

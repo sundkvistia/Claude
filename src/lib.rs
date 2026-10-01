@@ -7,9 +7,16 @@ use std::rc::Rc;
 use view::View;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, PointerEvent, WheelEvent};
+use web_sys::{
+    Blob, CanvasRenderingContext2d, HtmlAnchorElement, HtmlCanvasElement, PointerEvent, Url,
+    WheelEvent,
+};
 
 type Point = (f64, f64);
+/// A straight line segment from where the pointer went down to where it
+/// currently is (or was released). Holds a single point while the pointer
+/// is down but hasn't moved yet, and exactly two points — start and end —
+/// once it has.
 type Stroke = Vec<Point>;
 
 /// Screen-space line width, in device pixels at zoom = 1.0. Because the
@@ -125,6 +132,16 @@ fn render(state: &AppState) {
     ctx.restore();
 }
 
+/// Update the in-progress stroke's end point, keeping it a straight line
+/// from the original press position to `world`.
+fn set_stroke_end(stroke: &mut Stroke, world: Point) {
+    if stroke.len() < 2 {
+        stroke.push(world);
+    } else {
+        stroke[1] = world;
+    }
+}
+
 fn draw_stroke(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
     if stroke.len() < 2 {
         return;
@@ -192,6 +209,18 @@ fn install_listeners(
             on_wheel(&state, event);
         });
         canvas.add_event_listener_with_callback("wheel", handler.as_ref().unchecked_ref())?;
+        handler.forget();
+    }
+    if let Some(button) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id("download-tikz")
+    {
+        let state = state.clone();
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            let _ = download_tikz(&state.borrow());
+        });
+        button.add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
         handler.forget();
     }
     {
@@ -266,7 +295,7 @@ fn on_pointer_move(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
         } else if state.drawing_pointer_id == Some(pointer_id) {
             let world = state.view.screen_to_world(pos.0, pos.1);
             if let Some(stroke) = state.current_stroke.as_mut() {
-                stroke.push(world);
+                set_stroke_end(stroke, world);
                 dirty = true;
             }
         }
@@ -278,7 +307,7 @@ fn on_pointer_move(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
     } else if state.drawing_pointer_id == Some(pointer_id) {
         let world = state.view.screen_to_world(pos.0, pos.1);
         if let Some(stroke) = state.current_stroke.as_mut() {
-            stroke.push(world);
+            set_stroke_end(stroke, world);
             dirty = true;
         }
     }
@@ -323,4 +352,53 @@ fn on_wheel(state: &Rc<RefCell<AppState>>, event: WheelEvent) {
     let factor = (-event.delta_y() * 0.001).exp();
     state.view.zoom_at(factor, x, y);
     render(&state);
+}
+
+/// World units per TikZ coordinate unit. Keeps generated coordinates at a
+/// reasonable magnitude regardless of how zoomed-in the drawing was.
+const TIKZ_SCALE: f64 = 100.0;
+
+/// Render the straight-line strokes as TikZ `\draw` commands. The y axis is
+/// flipped because canvas coordinates grow downward while TikZ's grow
+/// upward.
+fn strokes_to_tikz(strokes: &[Stroke]) -> String {
+    let mut tikz = String::from("\\begin{tikzpicture}\n");
+    for stroke in strokes {
+        if let [(x0, y0), (x1, y1)] = stroke[..] {
+            tikz.push_str(&format!(
+                "  \\draw ({:.2},{:.2}) -- ({:.2},{:.2});\n",
+                x0 / TIKZ_SCALE,
+                -y0 / TIKZ_SCALE,
+                x1 / TIKZ_SCALE,
+                -y1 / TIKZ_SCALE,
+            ));
+        }
+    }
+    tikz.push_str("\\end{tikzpicture}\n");
+    tikz
+}
+
+/// Trigger a browser download of the drawing as a `.tex` file containing a
+/// standalone TikZ picture.
+fn download_tikz(state: &AppState) -> Result<(), JsValue> {
+    let tikz = strokes_to_tikz(&state.strokes);
+
+    let parts = js_sys::Array::new();
+    parts.push(&JsValue::from_str(&tikz));
+    let blob = Blob::new_with_str_sequence(&parts)?;
+    let url = Url::create_object_url_with_blob(&blob)?;
+
+    let document = web_sys::window()
+        .ok_or("no global window")?
+        .document()
+        .ok_or("no document")?;
+    let anchor = document
+        .create_element("a")?
+        .dyn_into::<HtmlAnchorElement>()?;
+    anchor.set_href(&url);
+    anchor.set_download("sketch.tex");
+    anchor.click();
+
+    Url::revoke_object_url(&url)?;
+    Ok(())
 }
