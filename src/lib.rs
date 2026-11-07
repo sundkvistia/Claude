@@ -8,8 +8,8 @@ use view::View;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    Blob, CanvasRenderingContext2d, HtmlAnchorElement, HtmlCanvasElement, HtmlInputElement,
-    HtmlSelectElement, PointerEvent, Url, WheelEvent,
+    CanvasRenderingContext2d, HtmlCanvasElement, HtmlInputElement, HtmlSelectElement,
+    HtmlTextAreaElement, PointerEvent, WheelEvent,
 };
 
 type Point = (f64, f64);
@@ -640,11 +640,33 @@ fn install_listeners(
     if let Some(button) = window
         .document()
         .ok_or("no document")?
-        .get_element_by_id("download-tikz")
+        .get_element_by_id("show-tikz")
     {
         let state = state.clone();
         let handler = Closure::<dyn FnMut()>::new(move || {
-            let _ = download_tikz(&state.borrow());
+            let _ = show_tikz_panel(&state.borrow());
+        });
+        button.add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
+        handler.forget();
+    }
+    if let Some(button) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id("close-tikz")
+    {
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            let _ = hide_tikz_panel();
+        });
+        button.add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
+        handler.forget();
+    }
+    if let Some(button) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id("copy-tikz")
+    {
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            let _ = copy_tikz_to_clipboard();
         });
         button.add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
         handler.forget();
@@ -955,27 +977,45 @@ fn strokes_to_tikz(state: &AppState) -> String {
     tikz
 }
 
-/// Trigger a browser download of the drawing as a `.tex` file containing a
-/// standalone TikZ picture.
-fn download_tikz(state: &AppState) -> Result<(), JsValue> {
+/// Fill `#tikz-output` with the drawing's current TikZ and reveal
+/// `#tikz-panel`, so the user can read it or copy it to the clipboard.
+fn show_tikz_panel(state: &AppState) -> Result<(), JsValue> {
     let tikz = strokes_to_tikz(state);
-
-    let parts = js_sys::Array::new();
-    parts.push(&JsValue::from_str(&tikz));
-    let blob = Blob::new_with_str_sequence(&parts)?;
-    let url = Url::create_object_url_with_blob(&blob)?;
-
     let document = web_sys::window()
         .ok_or("no global window")?
         .document()
         .ok_or("no document")?;
-    let anchor = document
-        .create_element("a")?
-        .dyn_into::<HtmlAnchorElement>()?;
-    anchor.set_href(&url);
-    anchor.set_download("sketch.tex");
-    anchor.click();
+    if let Some(textarea) = document.get_element_by_id("tikz-output") {
+        textarea.dyn_into::<HtmlTextAreaElement>()?.set_value(&tikz);
+    }
+    if let Some(panel) = document.get_element_by_id("tikz-panel") {
+        panel.remove_attribute("hidden")?;
+    }
+    Ok(())
+}
 
-    Url::revoke_object_url(&url)?;
+/// Hide `#tikz-panel`.
+fn hide_tikz_panel() -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .ok_or("no global window")?
+        .document()
+        .ok_or("no document")?;
+    if let Some(panel) = document.get_element_by_id("tikz-panel") {
+        panel.set_attribute("hidden", "")?;
+    }
+    Ok(())
+}
+
+/// Copy `#tikz-output`'s current contents to the clipboard.
+fn copy_tikz_to_clipboard() -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or("no global window")?;
+    let document = window.document().ok_or("no document")?;
+    let Some(textarea) = document.get_element_by_id("tikz-output") else {
+        return Ok(());
+    };
+    let textarea = textarea.dyn_into::<HtmlTextAreaElement>()?;
+    // Fire-and-forget: the returned promise can be dropped, since the
+    // clipboard write still completes asynchronously without being awaited.
+    let _ = window.navigator().clipboard().write_text(&textarea.value());
     Ok(())
 }

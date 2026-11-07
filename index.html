@@ -22,7 +22,7 @@
         /* Let Rust handle panning/zooming/drawing itself. */
         touch-action: none;
       }
-      #download-tikz {
+      #show-tikz {
         position: fixed;
         top: 12px;
         right: 12px;
@@ -35,7 +35,58 @@
         font: 14px sans-serif;
         cursor: pointer;
       }
-      #download-tikz:hover {
+      #show-tikz:hover {
+        background: #3a3a3a;
+      }
+      #tikz-panel {
+        position: fixed;
+        inset: 0;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.5);
+      }
+      #tikz-panel[hidden] {
+        display: none;
+      }
+      #tikz-panel-inner {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: min(600px, 90vw);
+        padding: 16px;
+        background: #2d2d2d;
+        border: 1px solid #4a4a4a;
+        border-radius: 6px;
+      }
+      #tikz-output {
+        width: 100%;
+        height: 280px;
+        padding: 8px;
+        background: #1e1e1e;
+        color: #f0f0f0;
+        border: 1px solid #4a4a4a;
+        border-radius: 4px;
+        font: 13px monospace;
+        resize: vertical;
+        box-sizing: border-box;
+      }
+      #tikz-panel-buttons {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      #tikz-panel-buttons button {
+        padding: 8px 12px;
+        background: #2d2d2d;
+        color: #f0f0f0;
+        border: 1px solid #4a4a4a;
+        border-radius: 4px;
+        font: 14px sans-serif;
+        cursor: pointer;
+      }
+      #tikz-panel-buttons button:hover {
         background: #3a3a3a;
       }
       #symmetric-label,
@@ -151,7 +202,16 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
-    <button id="download-tikz" type="button">Download TikZ</button>
+    <button id="show-tikz" type="button">Show TikZ</button>
+    <div id="tikz-panel" hidden>
+      <div id="tikz-panel-inner">
+        <textarea id="tikz-output" readonly spellcheck="false"></textarea>
+        <div id="tikz-panel-buttons">
+          <button id="copy-tikz" type="button">Copy to clipboard</button>
+          <button id="close-tikz" type="button">Close</button>
+        </div>
+      </div>
+    </div>
     <label id="symmetric-label">
       <input type="checkbox" id="symmetric-toggle" checked />
       Symmetric curve

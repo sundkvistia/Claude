@@ -8,7 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "=0.2.127"
-js-sys = "0.3"
 console_error_panic_hook = "0.1"
 
 [dependencies.web-sys]
@@ -25,11 +24,11 @@ features = [
   "PointerEvent",
   "WheelEvent",
   "DomRect",
-  "Blob",
-  "Url",
-  "HtmlAnchorElement",
   "HtmlInputElement",
   "HtmlSelectElement",
+  "HtmlTextAreaElement",
+  "Navigator",
+  "Clipboard",
 ]
 
 [profile.release]
