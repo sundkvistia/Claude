@@ -25,6 +25,11 @@ type Stroke = Vec<Point>;
 /// the ink itself scales with the drawing (like real ink on paper) rather
 /// than staying a fixed width on screen.
 const LINE_WIDTH: f64 = 3.0;
+/// Width of the background-colored halo drawn under each stroke before its
+/// ink, wider than `LINE_WIDTH` so it fully covers whatever is underneath.
+/// A higher-layer stroke's halo therefore paints over (and so visually cuts
+/// a gap in) any lower-layer line it crosses.
+const OUTLINE_WIDTH: f64 = LINE_WIDTH + 4.0;
 const DEFAULT_BACKGROUND: &str = "#1e1e1e";
 const DEFAULT_INK: &str = "#f0f0f0";
 
@@ -173,13 +178,24 @@ fn render(state: &AppState) {
         .expect("translate");
     ctx.scale(state.view.zoom, state.view.zoom).expect("scale");
 
-    ctx.set_stroke_style_str(&state.ink_color);
-    ctx.set_line_width(LINE_WIDTH);
     ctx.set_line_cap("round");
     ctx.set_line_join("round");
 
-    for stroke in state.strokes.iter().chain(state.current_stroke.iter()) {
-        draw_stroke(ctx, stroke);
+    // Draw lowest layer first so a higher-layer stroke's background-colored
+    // outline paints over (and cuts a visual gap in) lower-layer lines it
+    // crosses. Ties keep creation order, since `sort_by_key` is stable.
+    let mut order: Vec<usize> = (0..state.strokes.len()).collect();
+    order.sort_by_key(|&i| state.stroke_layers[i]);
+    for &i in &order {
+        draw_stroke(
+            ctx,
+            &state.strokes[i],
+            &state.ink_color,
+            &state.background_color,
+        );
+    }
+    if let Some(stroke) = &state.current_stroke {
+        draw_stroke(ctx, stroke, &state.ink_color, &state.background_color);
     }
     for stroke in &state.strokes {
         if stroke.len() == 4 {
@@ -200,13 +216,14 @@ fn set_stroke_end(stroke: &mut Stroke, world: Point) {
     }
 }
 
-fn draw_stroke(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
+/// Build the current path for `stroke` (a straight line or a Bezier
+/// curve), without stroking it.
+fn build_stroke_path(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
     match stroke.len() {
         2 => {
             ctx.begin_path();
             ctx.move_to(stroke[0].0, stroke[0].1);
             ctx.line_to(stroke[1].0, stroke[1].1);
-            ctx.stroke();
         }
         4 => {
             // stroke is [p0, p1, p2, p3]: curve from p0 to p1 using control
@@ -221,10 +238,32 @@ fn draw_stroke(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
                 stroke[1].0,
                 stroke[1].1,
             );
-            ctx.stroke();
         }
         _ => {}
     }
+}
+
+/// Draw `stroke` as a background-colored outline (wide enough to cover
+/// whatever is underneath it) followed by the ink line on top.
+fn draw_stroke(
+    ctx: &CanvasRenderingContext2d,
+    stroke: &Stroke,
+    ink_color: &str,
+    outline_color: &str,
+) {
+    if stroke.len() < 2 {
+        return;
+    }
+
+    ctx.set_stroke_style_str(outline_color);
+    ctx.set_line_width(OUTLINE_WIDTH);
+    build_stroke_path(ctx, stroke);
+    ctx.stroke();
+
+    ctx.set_stroke_style_str(ink_color);
+    ctx.set_line_width(LINE_WIDTH);
+    build_stroke_path(ctx, stroke);
+    ctx.stroke();
 }
 
 /// Draw a Bezier stroke's two draggable control-point handles (`p2`, `p3`)
