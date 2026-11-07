@@ -885,39 +885,84 @@ fn on_wheel(state: &Rc<RefCell<AppState>>, event: WheelEvent) {
 /// World units per TikZ coordinate unit. Keeps generated coordinates at a
 /// reasonable magnitude regardless of how zoomed-in the drawing was.
 const TIKZ_SCALE: f64 = 100.0;
+/// TikZ line widths, in points, for the ink and outline passes — the
+/// outline wider than the ink so it reads as a halo behind it, the same
+/// relationship `LINE_WIDTH`/`OUTLINE_WIDTH` give the canvas rendering.
+const TIKZ_INK_WIDTH_PT: f64 = 0.8;
+const TIKZ_OUTLINE_WIDTH_PT: f64 = 2.4;
 
-/// Render the strokes as TikZ `\draw` commands — a straight `--` for lines,
-/// a `.. controls .. and ..` Bezier for curves. The y axis is flipped
-/// because canvas coordinates grow downward while TikZ's grow upward.
-fn strokes_to_tikz(strokes: &[Stroke]) -> String {
+/// Build just the coordinate portion of a stroke's TikZ path (no leading
+/// `\draw` or trailing `;`) — a straight `--` for a line, a `.. controls
+/// .. and ..` Bezier for a curve — so it can be reused for both the
+/// outline and ink passes. The y axis is flipped because canvas
+/// coordinates grow downward while TikZ's grow upward. `None` for an
+/// in-progress stroke, which never reaches `AppState::strokes`.
+fn stroke_tikz_path(stroke: &Stroke) -> Option<String> {
+    match stroke[..] {
+        [(x0, y0), (x1, y1)] => Some(format!(
+            "({:.2},{:.2}) -- ({:.2},{:.2})",
+            x0 / TIKZ_SCALE,
+            -y0 / TIKZ_SCALE,
+            x1 / TIKZ_SCALE,
+            -y1 / TIKZ_SCALE,
+        )),
+        // p0, p1, p2, p3 are already in order along the curve, so they
+        // carry straight over into TikZ's own point order.
+        [(x0, y0), (x1, y1), (x2, y2), (x3, y3)] => Some(format!(
+            "({:.2},{:.2}) .. controls ({:.2},{:.2}) and ({:.2},{:.2}) .. ({:.2},{:.2})",
+            x0 / TIKZ_SCALE,
+            -y0 / TIKZ_SCALE,
+            x1 / TIKZ_SCALE,
+            -y1 / TIKZ_SCALE,
+            x2 / TIKZ_SCALE,
+            -y2 / TIKZ_SCALE,
+            x3 / TIKZ_SCALE,
+            -y3 / TIKZ_SCALE,
+        )),
+        _ => None,
+    }
+}
+
+/// Strip the leading `#` from a `#rrggbb` CSS color string (as produced by
+/// an `<input type="color">`) for TikZ/xcolor's `HTML` color model.
+fn tikz_hex_color(css_color: &str) -> &str {
+    css_color.strip_prefix('#').unwrap_or(css_color)
+}
+
+/// Render the drawing as a TikZ picture, matching what's on canvas: each
+/// stroke gets an arrowhead and a wider background-colored outline behind
+/// its ink. Strokes are emitted lowest layer first and, within a layer,
+/// every outline before any ink in that layer — the same scheme `render`
+/// uses on canvas — so a higher layer's outline still visually cuts a gap
+/// in a lower layer's line, but same-layer strokes don't cut into each
+/// other.
+fn strokes_to_tikz(state: &AppState) -> String {
     let mut tikz = String::from("\\begin{tikzpicture}\n");
-    for stroke in strokes {
-        match stroke[..] {
-            [(x0, y0), (x1, y1)] => {
+    tikz.push_str(&format!(
+        "  \\definecolor{{ink}}{{HTML}}{{{}}}\n",
+        tikz_hex_color(&state.ink_color)
+    ));
+    tikz.push_str(&format!(
+        "  \\definecolor{{bg}}{{HTML}}{{{}}}\n",
+        tikz_hex_color(&state.background_color)
+    ));
+    for layer in 0..NUM_LAYERS {
+        let indices: Vec<usize> = (0..state.strokes.len())
+            .filter(|&i| state.stroke_layers[i] == layer)
+            .collect();
+        for &i in &indices {
+            if let Some(path) = stroke_tikz_path(&state.strokes[i]) {
                 tikz.push_str(&format!(
-                    "  \\draw ({:.2},{:.2}) -- ({:.2},{:.2});\n",
-                    x0 / TIKZ_SCALE,
-                    -y0 / TIKZ_SCALE,
-                    x1 / TIKZ_SCALE,
-                    -y1 / TIKZ_SCALE,
+                    "  \\draw[->, draw=bg, line width={TIKZ_OUTLINE_WIDTH_PT}pt] {path};\n"
                 ));
             }
-            [(x0, y0), (x1, y1), (x2, y2), (x3, y3)] => {
-                // p0, p1, p2, p3 are already in order along the curve, so
-                // they carry straight over into TikZ's own point order.
+        }
+        for &i in &indices {
+            if let Some(path) = stroke_tikz_path(&state.strokes[i]) {
                 tikz.push_str(&format!(
-                    "  \\draw ({:.2},{:.2}) .. controls ({:.2},{:.2}) and ({:.2},{:.2}) .. ({:.2},{:.2});\n",
-                    x0 / TIKZ_SCALE,
-                    -y0 / TIKZ_SCALE,
-                    x1 / TIKZ_SCALE,
-                    -y1 / TIKZ_SCALE,
-                    x2 / TIKZ_SCALE,
-                    -y2 / TIKZ_SCALE,
-                    x3 / TIKZ_SCALE,
-                    -y3 / TIKZ_SCALE,
+                    "  \\draw[->, draw=ink, line width={TIKZ_INK_WIDTH_PT}pt] {path};\n"
                 ));
             }
-            _ => {}
         }
     }
     tikz.push_str("\\end{tikzpicture}\n");
@@ -927,7 +972,7 @@ fn strokes_to_tikz(strokes: &[Stroke]) -> String {
 /// Trigger a browser download of the drawing as a `.tex` file containing a
 /// standalone TikZ picture.
 fn download_tikz(state: &AppState) -> Result<(), JsValue> {
-    let tikz = strokes_to_tikz(&state.strokes);
+    let tikz = strokes_to_tikz(state);
 
     let parts = js_sys::Array::new();
     parts.push(&JsValue::from_str(&tikz));
