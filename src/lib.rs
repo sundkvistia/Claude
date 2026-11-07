@@ -25,8 +25,8 @@ type Stroke = Vec<Point>;
 /// the ink itself scales with the drawing (like real ink on paper) rather
 /// than staying a fixed width on screen.
 const LINE_WIDTH: f64 = 3.0;
-const BACKGROUND: &str = "#1e1e1e";
-const INK: &str = "#f0f0f0";
+const DEFAULT_BACKGROUND: &str = "#1e1e1e";
+const DEFAULT_INK: &str = "#f0f0f0";
 
 /// Visual radius of a draggable Bezier control-point handle, in device
 /// pixels at zoom = 1.0.
@@ -48,6 +48,13 @@ struct AppState {
     ctx: CanvasRenderingContext2d,
     dpr: f64,
     view: View,
+
+    /// Current line (ink) color, as a CSS color string. Set by the line
+    /// color picker; applies to all strokes, not just new ones.
+    ink_color: String,
+    /// Current canvas background color, as a CSS color string. Set by the
+    /// background color picker.
+    background_color: String,
 
     strokes: Vec<Stroke>,
     current_stroke: Option<Stroke>,
@@ -109,6 +116,8 @@ pub fn start() -> Result<(), JsValue> {
         ctx,
         dpr,
         view: View::default(),
+        ink_color: DEFAULT_INK.to_string(),
+        background_color: DEFAULT_BACKGROUND.to_string(),
         strokes: Vec::new(),
         current_stroke: None,
         drawing_pointer_id: None,
@@ -145,7 +154,7 @@ fn render(state: &AppState) {
     let width = state.canvas.width() as f64;
     let height = state.canvas.height() as f64;
 
-    ctx.set_fill_style_str(BACKGROUND);
+    ctx.set_fill_style_str(&state.background_color);
     ctx.fill_rect(0.0, 0.0, width, height);
 
     ctx.save();
@@ -153,7 +162,7 @@ fn render(state: &AppState) {
         .expect("translate");
     ctx.scale(state.view.zoom, state.view.zoom).expect("scale");
 
-    ctx.set_stroke_style_str(INK);
+    ctx.set_stroke_style_str(&state.ink_color);
     ctx.set_line_width(LINE_WIDTH);
     ctx.set_line_cap("round");
     ctx.set_line_join("round");
@@ -446,6 +455,12 @@ fn install_listeners(
         checkbox.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())?;
         handler.forget();
     }
+    install_color_picker(window, state, "ink-color", |state, color| {
+        state.ink_color = color;
+    })?;
+    install_color_picker(window, state, "background-color", |state, color| {
+        state.background_color = color;
+    })?;
     {
         let state = state.clone();
         let handler = Closure::<dyn FnMut()>::new(move || {
@@ -456,6 +471,34 @@ fn install_listeners(
         window.add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref())?;
         handler.forget();
     }
+    Ok(())
+}
+
+/// Wire a `<input type="color">` with id `element_id` so that changing it
+/// calls `apply(state, new_value)` and redraws.
+fn install_color_picker(
+    window: &web_sys::Window,
+    state: &Rc<RefCell<AppState>>,
+    element_id: &str,
+    apply: impl Fn(&mut AppState, String) + 'static,
+) -> Result<(), JsValue> {
+    let Some(input) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id(element_id)
+    else {
+        return Ok(());
+    };
+    let input = input.dyn_into::<HtmlInputElement>()?;
+    let state = state.clone();
+    let input_el = input.clone();
+    let handler = Closure::<dyn FnMut()>::new(move || {
+        let mut state = state.borrow_mut();
+        apply(&mut state, input_el.value());
+        render(&state);
+    });
+    input.add_event_listener_with_callback("input", handler.as_ref().unchecked_ref())?;
+    handler.forget();
     Ok(())
 }
 

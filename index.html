@@ -38,9 +38,9 @@
       #download-tikz:hover {
         background: #3a3a3a;
       }
-      #symmetric-label {
+      #symmetric-label,
+      .color-label {
         position: fixed;
-        top: 52px;
         right: 12px;
         z-index: 1;
         display: flex;
@@ -55,6 +55,24 @@
         cursor: pointer;
         user-select: none;
       }
+      #symmetric-label {
+        top: 52px;
+      }
+      #ink-color-label {
+        top: 92px;
+      }
+      #background-color-label {
+        top: 132px;
+      }
+      .color-label input[type="color"] {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid #4a4a4a;
+        border-radius: 3px;
+        background: none;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
@@ -63,6 +81,14 @@
     <label id="symmetric-label">
       <input type="checkbox" id="symmetric-toggle" checked />
       Symmetric curve
+    </label>
+    <label id="ink-color-label" class="color-label">
+      <input type="color" id="ink-color" value="#f0f0f0" />
+      Line color
+    </label>
+    <label id="background-color-label" class="color-label">
+      <input type="color" id="background-color" value="#1e1e1e" />
+      Background color
     </label>
   </body>
 </html>
