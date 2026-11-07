@@ -29,6 +29,7 @@ features = [
   "Url",
   "HtmlAnchorElement",
   "HtmlInputElement",
+  "HtmlSelectElement",
 ]
 
 [profile.release]

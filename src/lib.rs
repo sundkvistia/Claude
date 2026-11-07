@@ -9,7 +9,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
     Blob, CanvasRenderingContext2d, HtmlAnchorElement, HtmlCanvasElement, HtmlInputElement,
-    PointerEvent, Url, WheelEvent,
+    HtmlSelectElement, PointerEvent, Url, WheelEvent,
 };
 
 type Point = (f64, f64);
@@ -43,6 +43,9 @@ const CLICK_MOVE_THRESHOLD_PX: f64 = 6.0;
 const HANDLE_COLOR: &str = "#5fb3ff";
 const HANDLE_GUIDE_COLOR: &str = "rgba(95, 179, 255, 0.5)";
 
+/// Fixed number of layers strokes can be filed under.
+const NUM_LAYERS: usize = 5;
+
 struct AppState {
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
@@ -57,6 +60,12 @@ struct AppState {
     background_color: String,
 
     strokes: Vec<Stroke>,
+    /// Which of the `NUM_LAYERS` fixed layers each stroke in `strokes`
+    /// belongs to, in the same order (`stroke_layers[i]` is the layer of
+    /// `strokes[i]`), set at the time the stroke was drawn.
+    stroke_layers: Vec<usize>,
+    /// Layer new strokes are filed under, chosen by the layer selector.
+    active_layer: usize,
     current_stroke: Option<Stroke>,
     /// Pointer id currently drawing (left mouse button, pen, or a lone touch).
     drawing_pointer_id: Option<i32>,
@@ -119,6 +128,8 @@ pub fn start() -> Result<(), JsValue> {
         ink_color: DEFAULT_INK.to_string(),
         background_color: DEFAULT_BACKGROUND.to_string(),
         strokes: Vec::new(),
+        stroke_layers: Vec::new(),
+        active_layer: 0,
         current_stroke: None,
         drawing_pointer_id: None,
         pan_pointer_id: None,
@@ -461,6 +472,22 @@ fn install_listeners(
     install_color_picker(window, state, "background-color", |state, color| {
         state.background_color = color;
     })?;
+    if let Some(select) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id("layer-select")
+    {
+        let state = state.clone();
+        let select = select.dyn_into::<HtmlSelectElement>()?;
+        let select_el = select.clone();
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            if let Ok(layer) = select_el.value().parse::<usize>() {
+                state.borrow_mut().active_layer = layer.min(NUM_LAYERS - 1);
+            }
+        });
+        select.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())?;
+        handler.forget();
+    }
     {
         let state = state.clone();
         let handler = Closure::<dyn FnMut()>::new(move || {
@@ -603,7 +630,9 @@ fn on_pointer_up(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
             }
         } else if let Some(stroke) = state.current_stroke.take() {
             if stroke.len() > 1 {
+                let layer = state.active_layer;
                 state.strokes.push(stroke);
+                state.stroke_layers.push(layer);
             }
         }
     }
