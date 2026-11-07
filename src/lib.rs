@@ -690,9 +690,9 @@ fn install_listeners(
     {
         let state = state.clone();
         let handler = Closure::<dyn FnMut()>::new(move || {
-            let mut state = state.borrow_mut();
+            let state = state.borrow_mut();
             resize_canvas(&state);
-            render(&mut state);
+            render(&state);
         });
         window.add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref())?;
         handler.forget();
@@ -803,8 +803,9 @@ fn on_pointer_move(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
     let pointer_id = event.pointer_id();
     let mut dirty = false;
 
-    if state.touch_points.contains_key(&pointer_id) {
-        state.touch_points.insert(pointer_id, pos);
+    if let std::collections::hash_map::Entry::Occupied(mut e) = state.touch_points.entry(pointer_id)
+    {
+        e.insert(pos);
         if state.touch_points.len() == 2 {
             let (mid, dist) = gesture_state(&state.touch_points);
             if let Some((prev_mid, prev_dist)) = state.gesture_prev {
@@ -838,10 +839,8 @@ fn on_pointer_up(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
     let pointer_id = event.pointer_id();
     let _ = state.canvas.release_pointer_capture(pointer_id);
 
-    if state.touch_points.remove(&pointer_id).is_some() {
-        if state.touch_points.len() < 2 {
-            state.gesture_prev = None;
-        }
+    if state.touch_points.remove(&pointer_id).is_some() && state.touch_points.len() < 2 {
+        state.gesture_prev = None;
     }
     if state.drawing_pointer_id == Some(pointer_id) {
         state.drawing_pointer_id = None;
