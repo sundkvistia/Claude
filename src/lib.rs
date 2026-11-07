@@ -199,18 +199,22 @@ fn render(state: &AppState) {
     ctx.set_line_cap("round");
     ctx.set_line_join("round");
 
-    // Draw lowest layer first so a higher-layer stroke's background-colored
-    // outline paints over (and cuts a visual gap in) lower-layer lines it
-    // crosses. Ties keep creation order, since `sort_by_key` is stable.
-    let mut order: Vec<usize> = (0..state.strokes.len()).collect();
-    order.sort_by_key(|&i| state.stroke_layers[i]);
-    for &i in &order {
-        draw_stroke(
-            ctx,
-            &state.strokes[i],
-            &state.ink_color,
-            &state.background_color,
-        );
+    // Draw lowest layer first, and within each layer every stroke's
+    // outline before any of their ink. That way a higher layer's outline
+    // still paints over (and cuts a visual gap in) a lower layer's line,
+    // but no stroke's outline ever paints over another stroke in its own
+    // layer, since by the time any ink in a layer is drawn, that layer has
+    // no more outlines left to paint.
+    for layer in 0..NUM_LAYERS {
+        let indices: Vec<usize> = (0..state.strokes.len())
+            .filter(|&i| state.stroke_layers[i] == layer)
+            .collect();
+        for &i in &indices {
+            draw_stroke_outline(ctx, &state.strokes[i], &state.background_color);
+        }
+        for &i in &indices {
+            draw_stroke_ink(ctx, &state.strokes[i], &state.ink_color);
+        }
     }
     if let Some(stroke) = &state.current_stroke {
         draw_stroke(ctx, stroke, &state.ink_color, &state.background_color);
@@ -291,27 +295,44 @@ fn add_arrowhead(ctx: &CanvasRenderingContext2d, tip: Point, dir: Point) {
     }
 }
 
-/// Draw `stroke` as a background-colored outline (wide enough to cover
-/// whatever is underneath it) followed by the ink line on top.
+/// Draw `stroke`'s background-colored outline: wide enough to cover
+/// whatever is underneath it, so a higher layer's outline visually cuts a
+/// gap in a lower layer's line. Draw every same-layer stroke's outline
+/// before any of their ink (see `render`) so same-layer strokes never cut
+/// into each other this way.
+fn draw_stroke_outline(ctx: &CanvasRenderingContext2d, stroke: &Stroke, outline_color: &str) {
+    if stroke.len() < 2 {
+        return;
+    }
+    ctx.set_stroke_style_str(outline_color);
+    ctx.set_line_width(OUTLINE_WIDTH);
+    build_stroke_path(ctx, stroke);
+    ctx.stroke();
+}
+
+/// Draw `stroke`'s ink line on top of whatever outlines and ink came
+/// before it.
+fn draw_stroke_ink(ctx: &CanvasRenderingContext2d, stroke: &Stroke, ink_color: &str) {
+    if stroke.len() < 2 {
+        return;
+    }
+    ctx.set_stroke_style_str(ink_color);
+    ctx.set_line_width(LINE_WIDTH);
+    build_stroke_path(ctx, stroke);
+    ctx.stroke();
+}
+
+/// Draw `stroke`'s outline immediately followed by its own ink. Used for
+/// the one in-progress stroke, which isn't part of the per-layer batching
+/// `render` does for finished strokes.
 fn draw_stroke(
     ctx: &CanvasRenderingContext2d,
     stroke: &Stroke,
     ink_color: &str,
     outline_color: &str,
 ) {
-    if stroke.len() < 2 {
-        return;
-    }
-
-    ctx.set_stroke_style_str(outline_color);
-    ctx.set_line_width(OUTLINE_WIDTH);
-    build_stroke_path(ctx, stroke);
-    ctx.stroke();
-
-    ctx.set_stroke_style_str(ink_color);
-    ctx.set_line_width(LINE_WIDTH);
-    build_stroke_path(ctx, stroke);
-    ctx.stroke();
+    draw_stroke_outline(ctx, stroke, outline_color);
+    draw_stroke_ink(ctx, stroke, ink_color);
 }
 
 /// Draw a Bezier stroke's two draggable control-point handles (`p1`, `p2`)
