@@ -97,6 +97,30 @@
         font: 14px sans-serif;
         cursor: pointer;
       }
+      #snap-radius-label {
+        position: fixed;
+        top: 212px;
+        right: 12px;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        background: #2d2d2d;
+        color: #f0f0f0;
+        border: 1px solid #4a4a4a;
+        border-radius: 4px;
+        font: 14px sans-serif;
+        user-select: none;
+      }
+      #snap-radius {
+        width: 48px;
+        background: #1e1e1e;
+        color: #f0f0f0;
+        border: 1px solid #4a4a4a;
+        border-radius: 3px;
+        font: 14px sans-serif;
+      }
     </style>
   </head>
   <body>
@@ -123,6 +147,10 @@
         <option value="3">4</option>
         <option value="4">5</option>
       </select>
+    </label>
+    <label id="snap-radius-label">
+      Snap radius
+      <input type="number" id="snap-radius" value="12" min="0" max="100" step="1" />
     </label>
   </body>
 </html>

@@ -59,6 +59,11 @@ const ARROW_ANGLE: f64 = 0.4;
 /// Fixed number of layers strokes can be filed under.
 const NUM_LAYERS: usize = 5;
 
+/// Default for how close, in device pixels, a new line's start or end
+/// point needs to land to an existing stroke's endpoint to snap onto it.
+/// Editable via the "Snap radius" control.
+const DEFAULT_SNAP_RADIUS_PX: f64 = 12.0;
+
 struct AppState {
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
@@ -79,6 +84,10 @@ struct AppState {
     stroke_layers: Vec<usize>,
     /// Layer new strokes are filed under, chosen by the layer selector.
     active_layer: usize,
+    /// How close, in device pixels, a new line's start or end point needs
+    /// to land to an existing stroke's endpoint to snap onto it. Set by
+    /// the "Snap radius" control.
+    snap_radius_px: f64,
     current_stroke: Option<Stroke>,
     /// Pointer id currently drawing (left mouse button, pen, or a lone touch).
     drawing_pointer_id: Option<i32>,
@@ -143,6 +152,7 @@ pub fn start() -> Result<(), JsValue> {
         strokes: Vec::new(),
         stroke_layers: Vec::new(),
         active_layer: 0,
+        snap_radius_px: DEFAULT_SNAP_RADIUS_PX,
         current_stroke: None,
         drawing_pointer_id: None,
         pan_pointer_id: None,
@@ -435,8 +445,50 @@ fn hit_test_line(state: &AppState, pos: Point) -> Option<usize> {
     })
 }
 
+/// Update `best` with `anchor` if it's within `snap_radius` screen pixels
+/// of `pos` and closer than whatever `best` already holds.
+fn consider_snap_anchor(
+    view: &View,
+    pos: Point,
+    snap_radius: f64,
+    anchor: Point,
+    best: &mut Option<(f64, Point)>,
+) {
+    let (sx, sy) = view.world_to_screen(anchor.0, anchor.1);
+    let dist = ((pos.0 - sx).powi(2) + (pos.1 - sy).powi(2)).sqrt();
+    if dist <= snap_radius && best.is_none_or(|(d, _)| dist < d) {
+        *best = Some((dist, anchor));
+    }
+}
+
+/// World position to use for a press or drag landing at screen position
+/// `pos`: the nearest existing stroke's start or end anchor within
+/// `state.snap_radius_px` screen pixels, so new lines snap onto it, or
+/// `pos` converted to world space if none is close enough.
+fn snap_or_world(state: &AppState, pos: Point) -> Point {
+    let mut best: Option<(f64, Point)> = None;
+    for stroke in &state.strokes {
+        match stroke.len() {
+            2 => {
+                consider_snap_anchor(&state.view, pos, state.snap_radius_px, stroke[0], &mut best);
+                consider_snap_anchor(&state.view, pos, state.snap_radius_px, stroke[1], &mut best);
+            }
+            4 => {
+                consider_snap_anchor(&state.view, pos, state.snap_radius_px, stroke[0], &mut best);
+                consider_snap_anchor(&state.view, pos, state.snap_radius_px, stroke[3], &mut best);
+            }
+            _ => {}
+        }
+    }
+    match best {
+        Some((_, anchor)) => anchor,
+        None => state.view.screen_to_world(pos.0, pos.1),
+    }
+}
+
 /// Decide what a new press at `pos` does: grab a handle, mark a line as a
-/// click-to-convert candidate, or start drawing a new stroke.
+/// click-to-convert candidate, or start drawing a new stroke (snapping its
+/// start point onto a nearby existing endpoint, if any).
 fn begin_primary_press(state: &mut AppState, pos: Point) {
     if let Some(hit) = hit_test_handle(state, pos) {
         state.dragging_handle = Some(hit);
@@ -444,7 +496,7 @@ fn begin_primary_press(state: &mut AppState, pos: Point) {
         state.click_candidate = Some(idx);
         state.press_pos = Some(pos);
     } else {
-        state.current_stroke = Some(vec![state.view.screen_to_world(pos.0, pos.1)]);
+        state.current_stroke = Some(vec![snap_or_world(state, pos)]);
     }
 }
 
@@ -457,9 +509,13 @@ fn continue_primary_press(state: &mut AppState, pos: Point) -> bool {
         true
     } else if state.click_candidate.is_some() {
         false
-    } else if let Some(stroke) = state.current_stroke.as_mut() {
-        let world = state.view.screen_to_world(pos.0, pos.1);
-        set_stroke_end(stroke, world);
+    } else if state.current_stroke.is_some() {
+        // Snap the in-progress stroke's end point onto a nearby existing
+        // endpoint, same as its start point.
+        let world = snap_or_world(state, pos);
+        if let Some(stroke) = state.current_stroke.as_mut() {
+            set_stroke_end(stroke, world);
+        }
         true
     } else {
         false
@@ -548,11 +604,16 @@ fn install_listeners(
         checkbox.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())?;
         handler.forget();
     }
-    install_color_picker(window, state, "ink-color", |state, color| {
+    install_input_listener(window, state, "ink-color", |state, color| {
         state.ink_color = color;
     })?;
-    install_color_picker(window, state, "background-color", |state, color| {
+    install_input_listener(window, state, "background-color", |state, color| {
         state.background_color = color;
+    })?;
+    install_input_listener(window, state, "snap-radius", |state, value| {
+        if let Ok(radius) = value.parse::<f64>() {
+            state.snap_radius_px = radius.max(0.0);
+        }
     })?;
     if let Some(select) = window
         .document()
@@ -583,9 +644,9 @@ fn install_listeners(
     Ok(())
 }
 
-/// Wire a `<input type="color">` with id `element_id` so that changing it
-/// calls `apply(state, new_value)` and redraws.
-fn install_color_picker(
+/// Wire any `<input>` with id `element_id` so that changing it calls
+/// `apply(state, new_value)` with its string value and redraws.
+fn install_input_listener(
     window: &web_sys::Window,
     state: &Rc<RefCell<AppState>>,
     element_id: &str,
