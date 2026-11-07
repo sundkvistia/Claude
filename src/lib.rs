@@ -16,8 +16,9 @@ type Point = (f64, f64);
 /// A single press-to-release stroke. Holds one point while the pointer is
 /// down but hasn't moved yet. Once finished it is either a straight line
 /// `[p0, p1]` (start, end), or — after clicking the line to curve it — a
-/// cubic Bezier `[p0, p1, p2, p3]`, where `p2` is the control point near
-/// `p0` and `p3` is the control point near `p1`.
+/// cubic Bezier `[p0, p1, p2, p3]`, in order along the curve: `p0` is the
+/// start anchor, `p1` and `p2` are its two control points, and `p3` is the
+/// end anchor.
 type Stroke = Vec<Point>;
 
 /// Screen-space line width, in device pixels at zoom = 1.0. Because the
@@ -89,7 +90,7 @@ struct AppState {
     /// mirrored across the curve's perpendicular bisector. Set by the
     /// "Symmetric curve" checkbox.
     symmetric: bool,
-    /// (stroke index, point index — 2 or 3) of a Bezier control handle
+    /// (stroke index, point index — 1 or 2) of a Bezier control handle
     /// currently being dragged.
     dragging_handle: Option<(usize, usize)>,
     /// Index of a straight-line stroke the pointer went down on, pending
@@ -226,36 +227,40 @@ fn set_stroke_end(stroke: &mut Stroke, world: Point) {
 /// Build the current path for `stroke` (a straight line or a Bezier
 /// curve) plus an arrowhead at its end, without stroking it.
 fn build_stroke_path(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
-    // The direction the stroke is travelling as it arrives at `p1`, used to
-    // aim the arrowhead; `None` for an in-progress stroke with no path yet.
-    let tangent = match stroke.len() {
+    // The stroke's end point and the direction it's travelling as it
+    // arrives there, used to place and aim the arrowhead; `None` for an
+    // in-progress stroke with no path yet.
+    let end_and_tangent = match stroke.len() {
         2 => {
             ctx.begin_path();
             ctx.move_to(stroke[0].0, stroke[0].1);
             ctx.line_to(stroke[1].0, stroke[1].1);
-            Some((stroke[1].0 - stroke[0].0, stroke[1].1 - stroke[0].1))
+            let dir = (stroke[1].0 - stroke[0].0, stroke[1].1 - stroke[0].1);
+            Some((stroke[1], dir))
         }
         4 => {
-            // stroke is [p0, p1, p2, p3]: curve from p0 to p1 using control
-            // points p2 (near p0) and p3 (near p1).
+            // stroke is [p0, p1, p2, p3], in order along the curve: p0 is
+            // the start anchor, p1 and p2 are its control points, p3 is the
+            // end anchor.
             ctx.begin_path();
             ctx.move_to(stroke[0].0, stroke[0].1);
             ctx.bezier_curve_to(
+                stroke[1].0,
+                stroke[1].1,
                 stroke[2].0,
                 stroke[2].1,
                 stroke[3].0,
                 stroke[3].1,
-                stroke[1].0,
-                stroke[1].1,
             );
-            // The curve's tangent at its end is proportional to p1 - p3.
-            Some((stroke[1].0 - stroke[3].0, stroke[1].1 - stroke[3].1))
+            // The curve's tangent at its end is proportional to p3 - p2.
+            let dir = (stroke[3].0 - stroke[2].0, stroke[3].1 - stroke[2].1);
+            Some((stroke[3], dir))
         }
         _ => None,
     };
 
-    if let Some(dir) = tangent {
-        add_arrowhead(ctx, stroke[1], dir);
+    if let Some((tip, dir)) = end_and_tangent {
+        add_arrowhead(ctx, tip, dir);
     }
 }
 
@@ -299,7 +304,7 @@ fn draw_stroke(
     ctx.stroke();
 }
 
-/// Draw a Bezier stroke's two draggable control-point handles (`p2`, `p3`)
+/// Draw a Bezier stroke's two draggable control-point handles (`p1`, `p2`)
 /// and the guide lines from each anchor to its handle.
 fn draw_handles(ctx: &CanvasRenderingContext2d, stroke: &Stroke, zoom: f64) {
     let r = HANDLE_RADIUS_PX / zoom;
@@ -307,7 +312,7 @@ fn draw_handles(ctx: &CanvasRenderingContext2d, stroke: &Stroke, zoom: f64) {
     ctx.set_line_width(1.0 / zoom);
     ctx.set_stroke_style_str(HANDLE_GUIDE_COLOR);
 
-    for &(anchor, handle) in &[(stroke[0], stroke[2]), (stroke[1], stroke[3])] {
+    for &(anchor, handle) in &[(stroke[0], stroke[1]), (stroke[3], stroke[2])] {
         ctx.begin_path();
         ctx.move_to(anchor.0, anchor.1);
         ctx.line_to(handle.0, handle.1);
@@ -315,7 +320,7 @@ fn draw_handles(ctx: &CanvasRenderingContext2d, stroke: &Stroke, zoom: f64) {
     }
 
     ctx.set_fill_style_str(HANDLE_COLOR);
-    for &(x, y) in &[stroke[2], stroke[3]] {
+    for &(x, y) in &[stroke[1], stroke[2]] {
         ctx.begin_path();
         let _ = ctx.arc(x, y, r, 0.0, std::f64::consts::PI * 2.0);
         ctx.fill();
@@ -335,14 +340,18 @@ fn default_bezier_controls(p0: Point, p1: Point) -> (Point, Point) {
 }
 
 /// Turn a straight-line stroke `[p0, p1]` into a Bezier curve `[p0, p1, p2,
-/// p3]`. A no-op if `stroke` is already a curve (or isn't a finished line).
+/// p3]`, in order along the curve (`p0` and `p3` keep the line's original
+/// start and end). A no-op if `stroke` is already a curve (or isn't a
+/// finished line).
 fn convert_to_bezier(stroke: &mut Stroke) {
     if stroke.len() != 2 {
         return;
     }
-    let (p2, p3) = default_bezier_controls(stroke[0], stroke[1]);
+    let (p0, end) = (stroke[0], stroke[1]);
+    let (p1, p2) = default_bezier_controls(p0, end);
+    stroke[1] = p1;
     stroke.push(p2);
-    stroke.push(p3);
+    stroke.push(end);
 }
 
 /// Reflect `p` across the perpendicular bisector of the segment `p0`-`p1`:
@@ -362,7 +371,7 @@ fn mirror_across_perp_bisector(p0: Point, p1: Point, p: Point) -> Point {
     (mid.0 + vx - 2.0 * t * dx, mid.1 + vy - 2.0 * t * dy)
 }
 
-/// Move Bezier control point `point_idx` (2 or 3) of `strokes[stroke_idx]`
+/// Move Bezier control point `point_idx` (1 or 2) of `strokes[stroke_idx]`
 /// to `world`. In symmetric mode the opposite control point is updated to
 /// match, mirrored across the curve's perpendicular bisector.
 fn update_control_point(state: &mut AppState, stroke_idx: usize, point_idx: usize, world: Point) {
@@ -373,9 +382,10 @@ fn update_control_point(state: &mut AppState, stroke_idx: usize, point_idx: usiz
         }
         stroke[point_idx] = world;
         if symmetric {
-            let (p0, p1) = (stroke[0], stroke[1]);
-            let mirrored = mirror_across_perp_bisector(p0, p1, world);
-            let other_idx = if point_idx == 2 { 3 } else { 2 };
+            // The curve's two anchors are p0 and p3 (start and end).
+            let (p0, p3) = (stroke[0], stroke[3]);
+            let mirrored = mirror_across_perp_bisector(p0, p3, world);
+            let other_idx = if point_idx == 1 { 2 } else { 1 };
             stroke[other_idx] = mirrored;
         }
     }
@@ -394,14 +404,14 @@ fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
     ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
 }
 
-/// Find a Bezier control handle (`p2` or `p3`) under screen position `pos`,
+/// Find a Bezier control handle (`p1` or `p2`) under screen position `pos`,
 /// if any. Returns (stroke index, point index).
 fn hit_test_handle(state: &AppState, pos: Point) -> Option<(usize, usize)> {
     for (i, stroke) in state.strokes.iter().enumerate() {
         if stroke.len() != 4 {
             continue;
         }
-        for &point_idx in &[2usize, 3usize] {
+        for &point_idx in &[1usize, 2usize] {
             let (wx, wy) = stroke[point_idx];
             let (sx, sy) = state.view.world_to_screen(wx, wy);
             if ((pos.0 - sx).powi(2) + (pos.1 - sy).powi(2)).sqrt() <= HANDLE_HIT_RADIUS_PX {
@@ -748,16 +758,18 @@ fn strokes_to_tikz(strokes: &[Stroke]) -> String {
                 ));
             }
             [(x0, y0), (x1, y1), (x2, y2), (x3, y3)] => {
+                // p0, p1, p2, p3 are already in order along the curve, so
+                // they carry straight over into TikZ's own point order.
                 tikz.push_str(&format!(
                     "  \\draw ({:.2},{:.2}) .. controls ({:.2},{:.2}) and ({:.2},{:.2}) .. ({:.2},{:.2});\n",
                     x0 / TIKZ_SCALE,
                     -y0 / TIKZ_SCALE,
+                    x1 / TIKZ_SCALE,
+                    -y1 / TIKZ_SCALE,
                     x2 / TIKZ_SCALE,
                     -y2 / TIKZ_SCALE,
                     x3 / TIKZ_SCALE,
                     -y3 / TIKZ_SCALE,
-                    x1 / TIKZ_SCALE,
-                    -y1 / TIKZ_SCALE,
                 ));
             }
             _ => {}
