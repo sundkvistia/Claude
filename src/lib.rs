@@ -134,9 +134,7 @@ fn resize_canvas(state: &AppState) {
     let window = web_sys::window().expect("no global window");
     let width = window.inner_width().unwrap().as_f64().unwrap_or(0.0);
     let height = window.inner_height().unwrap().as_f64().unwrap_or(0.0);
-    state
-        .canvas
-        .set_width((width * state.dpr).max(1.0) as u32);
+    state.canvas.set_width((width * state.dpr).max(1.0) as u32);
     state
         .canvas
         .set_height((height * state.dpr).max(1.0) as u32);

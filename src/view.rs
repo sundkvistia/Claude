@@ -12,7 +12,11 @@ pub struct View {
 
 impl Default for View {
     fn default() -> Self {
-        View { pan_x: 0.0, pan_y: 0.0, zoom: 1.0 }
+        View {
+            pan_x: 0.0,
+            pan_y: 0.0,
+            zoom: 1.0,
+        }
     }
 }
 
