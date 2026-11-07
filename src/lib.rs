@@ -48,6 +48,13 @@ const CLICK_MOVE_THRESHOLD_PX: f64 = 6.0;
 const HANDLE_COLOR: &str = "#5fb3ff";
 const HANDLE_GUIDE_COLOR: &str = "rgba(95, 179, 255, 0.5)";
 
+/// Length of each arrowhead wing, in the same world-scaling units as
+/// `LINE_WIDTH` (so the arrowhead grows and shrinks with the drawing).
+const ARROW_LENGTH: f64 = 14.0;
+/// Angle, in radians, between each arrowhead wing and the line reversed —
+/// i.e. half the arrowhead's total spread.
+const ARROW_ANGLE: f64 = 0.4;
+
 /// Fixed number of layers strokes can be filed under.
 const NUM_LAYERS: usize = 5;
 
@@ -217,13 +224,16 @@ fn set_stroke_end(stroke: &mut Stroke, world: Point) {
 }
 
 /// Build the current path for `stroke` (a straight line or a Bezier
-/// curve), without stroking it.
+/// curve) plus an arrowhead at its end, without stroking it.
 fn build_stroke_path(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
-    match stroke.len() {
+    // The direction the stroke is travelling as it arrives at `p1`, used to
+    // aim the arrowhead; `None` for an in-progress stroke with no path yet.
+    let tangent = match stroke.len() {
         2 => {
             ctx.begin_path();
             ctx.move_to(stroke[0].0, stroke[0].1);
             ctx.line_to(stroke[1].0, stroke[1].1);
+            Some((stroke[1].0 - stroke[0].0, stroke[1].1 - stroke[0].1))
         }
         4 => {
             // stroke is [p0, p1, p2, p3]: curve from p0 to p1 using control
@@ -238,8 +248,31 @@ fn build_stroke_path(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
                 stroke[1].0,
                 stroke[1].1,
             );
+            // The curve's tangent at its end is proportional to p1 - p3.
+            Some((stroke[1].0 - stroke[3].0, stroke[1].1 - stroke[3].1))
         }
-        _ => {}
+        _ => None,
+    };
+
+    if let Some(dir) = tangent {
+        add_arrowhead(ctx, stroke[1], dir);
+    }
+}
+
+/// Add the two short "wing" segments of an arrowhead at `tip`, aimed back
+/// along `dir` (the direction of travel arriving at `tip`). A no-op if
+/// `dir` is the zero vector (a degenerate, zero-length line or curve).
+fn add_arrowhead(ctx: &CanvasRenderingContext2d, tip: Point, dir: Point) {
+    let len = (dir.0 * dir.0 + dir.1 * dir.1).sqrt();
+    if len == 0.0 {
+        return;
+    }
+    let back = (-dir.0 / len, -dir.1 / len);
+    for &angle in &[ARROW_ANGLE, -ARROW_ANGLE] {
+        let (sin, cos) = angle.sin_cos();
+        let wing = (back.0 * cos - back.1 * sin, back.0 * sin + back.1 * cos);
+        ctx.move_to(tip.0, tip.1);
+        ctx.line_to(tip.0 + wing.0 * ARROW_LENGTH, tip.1 + wing.1 * ARROW_LENGTH);
     }
 }
 
