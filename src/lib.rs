@@ -923,29 +923,16 @@ fn stroke_tikz_path(stroke: &Stroke) -> Option<String> {
     }
 }
 
-/// Strip the leading `#` from a `#rrggbb` CSS color string (as produced by
-/// an `<input type="color">`) for TikZ/xcolor's `HTML` color model.
-fn tikz_hex_color(css_color: &str) -> &str {
-    css_color.strip_prefix('#').unwrap_or(css_color)
-}
-
-/// Render the drawing as a TikZ picture, matching what's on canvas: each
-/// stroke gets an arrowhead and a wider background-colored outline behind
-/// its ink. Strokes are emitted lowest layer first and, within a layer,
-/// every outline before any ink in that layer — the same scheme `render`
-/// uses on canvas — so a higher layer's outline still visually cuts a gap
-/// in a lower layer's line, but same-layer strokes don't cut into each
-/// other.
+/// Render the drawing as a TikZ picture, matching the canvas's layout but
+/// always in black and white regardless of the on-screen ink/background
+/// colors: each stroke gets an arrowhead and a wider white outline behind
+/// its black ink. Strokes are emitted lowest layer first and, within a
+/// layer, every outline before any ink in that layer — the same scheme
+/// `render` uses on canvas — so a higher layer's outline still visually
+/// cuts a gap in a lower layer's line, but same-layer strokes don't cut
+/// into each other.
 fn strokes_to_tikz(state: &AppState) -> String {
     let mut tikz = String::from("\\begin{tikzpicture}\n");
-    tikz.push_str(&format!(
-        "  \\definecolor{{ink}}{{HTML}}{{{}}}\n",
-        tikz_hex_color(&state.ink_color)
-    ));
-    tikz.push_str(&format!(
-        "  \\definecolor{{bg}}{{HTML}}{{{}}}\n",
-        tikz_hex_color(&state.background_color)
-    ));
     for layer in 0..NUM_LAYERS {
         let indices: Vec<usize> = (0..state.strokes.len())
             .filter(|&i| state.stroke_layers[i] == layer)
@@ -953,14 +940,14 @@ fn strokes_to_tikz(state: &AppState) -> String {
         for &i in &indices {
             if let Some(path) = stroke_tikz_path(&state.strokes[i]) {
                 tikz.push_str(&format!(
-                    "  \\draw[->, draw=bg, line width={TIKZ_OUTLINE_WIDTH_PT}pt] {path};\n"
+                    "  \\draw[->, draw=white, line width={TIKZ_OUTLINE_WIDTH_PT}pt] {path};\n"
                 ));
             }
         }
         for &i in &indices {
             if let Some(path) = stroke_tikz_path(&state.strokes[i]) {
                 tikz.push_str(&format!(
-                    "  \\draw[->, draw=ink, line width={TIKZ_INK_WIDTH_PT}pt] {path};\n"
+                    "  \\draw[->, draw=black, line width={TIKZ_INK_WIDTH_PT}pt] {path};\n"
                 ));
             }
         }
