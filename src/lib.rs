@@ -504,12 +504,9 @@ fn snap_to_grid_point(p: Point, grid: f64) -> Point {
     ((p.0 / grid).round() * grid, (p.1 / grid).round() * grid)
 }
 
-/// World position to use for a press or drag landing at screen position
-/// `pos`: the nearest existing stroke's start or end anchor within
-/// `state.snap_radius_px` screen pixels, so new lines snap onto it; failing
-/// that, the nearest grid intersection if `state.snap_to_grid` is on;
-/// otherwise `pos` converted to world space outright.
-fn snap_or_world(state: &AppState, pos: Point) -> Point {
+/// Find the nearest existing stroke's start or end anchor within
+/// `state.snap_radius_px` screen pixels of `pos`, if any.
+fn find_snap_anchor(state: &AppState, pos: Point) -> Option<Point> {
     let mut best: Option<(f64, Point)> = None;
     for stroke in &state.strokes {
         match stroke.len() {
@@ -524,25 +521,36 @@ fn snap_or_world(state: &AppState, pos: Point) -> Point {
             _ => {}
         }
     }
-    match best {
-        Some((_, anchor)) => anchor,
-        None => {
-            let world = state.view.screen_to_world(pos.0, pos.1);
-            if state.snap_to_grid {
-                snap_to_grid_point(world, state.grid_size)
-            } else {
-                world
-            }
-        }
+    best.map(|(_, anchor)| anchor)
+}
+
+/// World position to use for a press or drag landing at screen position
+/// `pos`: the nearest existing stroke's start or end anchor within
+/// `state.snap_radius_px` screen pixels, so new lines snap onto it; failing
+/// that, the nearest grid intersection if `state.snap_to_grid` is on;
+/// otherwise `pos` converted to world space outright.
+fn snap_or_world(state: &AppState, pos: Point) -> Point {
+    if let Some(anchor) = find_snap_anchor(state, pos) {
+        return anchor;
+    }
+    let world = state.view.screen_to_world(pos.0, pos.1);
+    if state.snap_to_grid {
+        snap_to_grid_point(world, state.grid_size)
+    } else {
+        world
     }
 }
 
-/// Decide what a new press at `pos` does: grab a handle, mark a line as a
-/// click-to-convert candidate, or start drawing a new stroke (snapping its
-/// start point onto a nearby existing endpoint, if any).
+/// Decide what a new press at `pos` does: grab a handle, start a new
+/// stroke snapped onto a nearby existing endpoint (checked before
+/// click-to-convert, so a line can always be started from another line's
+/// endpoint even though an endpoint is also part of that line), mark a
+/// line as a click-to-convert candidate, or start an unsnapped new stroke.
 fn begin_primary_press(state: &mut AppState, pos: Point) {
     if let Some(hit) = hit_test_handle(state, pos) {
         state.dragging_handle = Some(hit);
+    } else if find_snap_anchor(state, pos).is_some() {
+        state.current_stroke = Some(vec![snap_or_world(state, pos)]);
     } else if let Some(idx) = hit_test_line(state, pos) {
         state.click_candidate = Some(idx);
         state.press_pos = Some(pos);
