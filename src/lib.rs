@@ -64,6 +64,10 @@ const NUM_LAYERS: usize = 5;
 /// Editable via the "Snap radius" control.
 const DEFAULT_SNAP_RADIUS_PX: f64 = 12.0;
 
+/// Default spacing, in world units, of the grid a new line's start or end
+/// point snaps to when "Snap to grid" is on. Editable via "Grid size".
+const DEFAULT_GRID_SIZE: f64 = 50.0;
+
 struct AppState {
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
@@ -88,6 +92,13 @@ struct AppState {
     /// to land to an existing stroke's endpoint to snap onto it. Set by
     /// the "Snap radius" control.
     snap_radius_px: f64,
+    /// Whether a new line's start or end point snaps to the nearest grid
+    /// intersection when it isn't close enough to snap to an existing
+    /// endpoint. Set by the "Snap to grid" checkbox.
+    snap_to_grid: bool,
+    /// Spacing, in world units, of the grid used when `snap_to_grid` is
+    /// on. Set by the "Grid size" control.
+    grid_size: f64,
     current_stroke: Option<Stroke>,
     /// Pointer id currently drawing (left mouse button, pen, or a lone touch).
     drawing_pointer_id: Option<i32>,
@@ -153,6 +164,8 @@ pub fn start() -> Result<(), JsValue> {
         stroke_layers: Vec::new(),
         active_layer: 0,
         snap_radius_px: DEFAULT_SNAP_RADIUS_PX,
+        snap_to_grid: false,
+        grid_size: DEFAULT_GRID_SIZE,
         current_stroke: None,
         drawing_pointer_id: None,
         pan_pointer_id: None,
@@ -482,10 +495,20 @@ fn consider_snap_anchor(
     }
 }
 
+/// Round `p` to the nearest intersection of a grid spaced `grid` world
+/// units apart. A no-op (returns `p` unchanged) if `grid` isn't positive.
+fn snap_to_grid_point(p: Point, grid: f64) -> Point {
+    if grid <= 0.0 {
+        return p;
+    }
+    ((p.0 / grid).round() * grid, (p.1 / grid).round() * grid)
+}
+
 /// World position to use for a press or drag landing at screen position
 /// `pos`: the nearest existing stroke's start or end anchor within
-/// `state.snap_radius_px` screen pixels, so new lines snap onto it, or
-/// `pos` converted to world space if none is close enough.
+/// `state.snap_radius_px` screen pixels, so new lines snap onto it; failing
+/// that, the nearest grid intersection if `state.snap_to_grid` is on;
+/// otherwise `pos` converted to world space outright.
 fn snap_or_world(state: &AppState, pos: Point) -> Point {
     let mut best: Option<(f64, Point)> = None;
     for stroke in &state.strokes {
@@ -503,7 +526,14 @@ fn snap_or_world(state: &AppState, pos: Point) -> Point {
     }
     match best {
         Some((_, anchor)) => anchor,
-        None => state.view.screen_to_world(pos.0, pos.1),
+        None => {
+            let world = state.view.screen_to_world(pos.0, pos.1);
+            if state.snap_to_grid {
+                snap_to_grid_point(world, state.grid_size)
+            } else {
+                world
+            }
+        }
     }
 }
 
@@ -611,20 +641,12 @@ fn install_listeners(
         button.add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
         handler.forget();
     }
-    if let Some(checkbox) = window
-        .document()
-        .ok_or("no document")?
-        .get_element_by_id("symmetric-toggle")
-    {
-        let state = state.clone();
-        let checkbox = checkbox.dyn_into::<HtmlInputElement>()?;
-        let handler_checkbox = checkbox.clone();
-        let handler = Closure::<dyn FnMut()>::new(move || {
-            state.borrow_mut().symmetric = handler_checkbox.checked();
-        });
-        checkbox.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())?;
-        handler.forget();
-    }
+    install_checkbox_listener(window, state, "symmetric-toggle", |state, checked| {
+        state.symmetric = checked;
+    })?;
+    install_checkbox_listener(window, state, "grid-toggle", |state, checked| {
+        state.snap_to_grid = checked;
+    })?;
     install_input_listener(window, state, "ink-color", |state, color| {
         state.ink_color = color;
     })?;
@@ -634,6 +656,11 @@ fn install_listeners(
     install_input_listener(window, state, "snap-radius", |state, value| {
         if let Ok(radius) = value.parse::<f64>() {
             state.snap_radius_px = radius.max(0.0);
+        }
+    })?;
+    install_input_listener(window, state, "grid-size", |state, value| {
+        if let Ok(size) = value.parse::<f64>() {
+            state.grid_size = size.max(0.0);
         }
     })?;
     if let Some(select) = window
@@ -689,6 +716,34 @@ fn install_input_listener(
         render(&state);
     });
     input.add_event_listener_with_callback("input", handler.as_ref().unchecked_ref())?;
+    handler.forget();
+    Ok(())
+}
+
+/// Wire a `<input type="checkbox">` with id `element_id` so that changing
+/// it calls `apply(state, checked)` and redraws.
+fn install_checkbox_listener(
+    window: &web_sys::Window,
+    state: &Rc<RefCell<AppState>>,
+    element_id: &str,
+    apply: impl Fn(&mut AppState, bool) + 'static,
+) -> Result<(), JsValue> {
+    let Some(checkbox) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id(element_id)
+    else {
+        return Ok(());
+    };
+    let checkbox = checkbox.dyn_into::<HtmlInputElement>()?;
+    let state = state.clone();
+    let checkbox_el = checkbox.clone();
+    let handler = Closure::<dyn FnMut()>::new(move || {
+        let mut state = state.borrow_mut();
+        apply(&mut state, checkbox_el.checked());
+        render(&state);
+    });
+    checkbox.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())?;
     handler.forget();
     Ok(())
 }
