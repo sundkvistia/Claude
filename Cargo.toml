@@ -28,6 +28,7 @@ features = [
   "Blob",
   "Url",
   "HtmlAnchorElement",
+  "HtmlInputElement",
 ]
 
 [profile.release]

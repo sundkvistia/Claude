@@ -8,15 +8,16 @@ use view::View;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    Blob, CanvasRenderingContext2d, HtmlAnchorElement, HtmlCanvasElement, PointerEvent, Url,
-    WheelEvent,
+    Blob, CanvasRenderingContext2d, HtmlAnchorElement, HtmlCanvasElement, HtmlInputElement,
+    PointerEvent, Url, WheelEvent,
 };
 
 type Point = (f64, f64);
-/// A straight line segment from where the pointer went down to where it
-/// currently is (or was released). Holds a single point while the pointer
-/// is down but hasn't moved yet, and exactly two points — start and end —
-/// once it has.
+/// A single press-to-release stroke. Holds one point while the pointer is
+/// down but hasn't moved yet. Once finished it is either a straight line
+/// `[p0, p1]` (start, end), or — after clicking the line to curve it — a
+/// cubic Bezier `[p0, p1, p2, p3]`, where `p2` is the control point near
+/// `p0` and `p3` is the control point near `p1`.
 type Stroke = Vec<Point>;
 
 /// Screen-space line width, in device pixels at zoom = 1.0. Because the
@@ -26,6 +27,21 @@ type Stroke = Vec<Point>;
 const LINE_WIDTH: f64 = 3.0;
 const BACKGROUND: &str = "#1e1e1e";
 const INK: &str = "#f0f0f0";
+
+/// Visual radius of a draggable Bezier control-point handle, in device
+/// pixels at zoom = 1.0.
+const HANDLE_RADIUS_PX: f64 = 5.0;
+/// How close a press needs to land to a handle to grab it, in device
+/// pixels — larger than `HANDLE_RADIUS_PX` so handles are easy to hit.
+const HANDLE_HIT_RADIUS_PX: f64 = 10.0;
+/// How close a press needs to land to a straight line to click-convert it
+/// into a curve, in device pixels.
+const LINE_HIT_TOLERANCE_PX: f64 = 8.0;
+/// Maximum total pointer movement, in device pixels, for a press+release to
+/// still count as a click (rather than a drag) on a line.
+const CLICK_MOVE_THRESHOLD_PX: f64 = 6.0;
+const HANDLE_COLOR: &str = "#5fb3ff";
+const HANDLE_GUIDE_COLOR: &str = "rgba(95, 179, 255, 0.5)";
 
 struct AppState {
     canvas: HtmlCanvasElement,
@@ -40,6 +56,21 @@ struct AppState {
     /// Pointer id currently panning (middle mouse button).
     pan_pointer_id: Option<i32>,
     last_pan_pos: Point,
+
+    /// Whether dragging one Bezier control point also moves the other one,
+    /// mirrored across the curve's perpendicular bisector. Set by the
+    /// "Symmetric curve" checkbox.
+    symmetric: bool,
+    /// (stroke index, point index — 2 or 3) of a Bezier control handle
+    /// currently being dragged.
+    dragging_handle: Option<(usize, usize)>,
+    /// Index of a straight-line stroke the pointer went down on, pending
+    /// confirmation at pointer-up that this was a click (not a drag) before
+    /// converting it into a curve.
+    click_candidate: Option<usize>,
+    /// Screen position where the current press began, used to tell a click
+    /// on `click_candidate` apart from a drag.
+    press_pos: Option<Point>,
 
     /// Screen position of every touch pointer currently down, keyed by id.
     touch_points: HashMap<i32, Point>,
@@ -83,6 +114,10 @@ pub fn start() -> Result<(), JsValue> {
         drawing_pointer_id: None,
         pan_pointer_id: None,
         last_pan_pos: (0.0, 0.0),
+        symmetric: true,
+        dragging_handle: None,
+        click_candidate: None,
+        press_pos: None,
         touch_points: HashMap::new(),
         gesture_prev: None,
     }));
@@ -128,6 +163,11 @@ fn render(state: &AppState) {
     for stroke in state.strokes.iter().chain(state.current_stroke.iter()) {
         draw_stroke(ctx, stroke);
     }
+    for stroke in &state.strokes {
+        if stroke.len() == 4 {
+            draw_handles(ctx, stroke, state.view.zoom);
+        }
+    }
 
     ctx.restore();
 }
@@ -143,16 +183,187 @@ fn set_stroke_end(stroke: &mut Stroke, world: Point) {
 }
 
 fn draw_stroke(ctx: &CanvasRenderingContext2d, stroke: &Stroke) {
-    if stroke.len() < 2 {
+    match stroke.len() {
+        2 => {
+            ctx.begin_path();
+            ctx.move_to(stroke[0].0, stroke[0].1);
+            ctx.line_to(stroke[1].0, stroke[1].1);
+            ctx.stroke();
+        }
+        4 => {
+            // stroke is [p0, p1, p2, p3]: curve from p0 to p1 using control
+            // points p2 (near p0) and p3 (near p1).
+            ctx.begin_path();
+            ctx.move_to(stroke[0].0, stroke[0].1);
+            ctx.bezier_curve_to(
+                stroke[2].0,
+                stroke[2].1,
+                stroke[3].0,
+                stroke[3].1,
+                stroke[1].0,
+                stroke[1].1,
+            );
+            ctx.stroke();
+        }
+        _ => {}
+    }
+}
+
+/// Draw a Bezier stroke's two draggable control-point handles (`p2`, `p3`)
+/// and the guide lines from each anchor to its handle.
+fn draw_handles(ctx: &CanvasRenderingContext2d, stroke: &Stroke, zoom: f64) {
+    let r = HANDLE_RADIUS_PX / zoom;
+    ctx.save();
+    ctx.set_line_width(1.0 / zoom);
+    ctx.set_stroke_style_str(HANDLE_GUIDE_COLOR);
+
+    for &(anchor, handle) in &[(stroke[0], stroke[2]), (stroke[1], stroke[3])] {
+        ctx.begin_path();
+        ctx.move_to(anchor.0, anchor.1);
+        ctx.line_to(handle.0, handle.1);
+        ctx.stroke();
+    }
+
+    ctx.set_fill_style_str(HANDLE_COLOR);
+    for &(x, y) in &[stroke[2], stroke[3]] {
+        ctx.begin_path();
+        let _ = ctx.arc(x, y, r, 0.0, std::f64::consts::PI * 2.0);
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+/// Default control points when a straight line first becomes a curve:
+/// colinear points a third of the way in from each end, so the curve looks
+/// identical to the line until the handles are dragged.
+fn default_bezier_controls(p0: Point, p1: Point) -> (Point, Point) {
+    let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+    (
+        (p0.0 + dx / 3.0, p0.1 + dy / 3.0),
+        (p0.0 + dx * 2.0 / 3.0, p0.1 + dy * 2.0 / 3.0),
+    )
+}
+
+/// Turn a straight-line stroke `[p0, p1]` into a Bezier curve `[p0, p1, p2,
+/// p3]`. A no-op if `stroke` is already a curve (or isn't a finished line).
+fn convert_to_bezier(stroke: &mut Stroke) {
+    if stroke.len() != 2 {
         return;
     }
-    ctx.begin_path();
-    let (x0, y0) = stroke[0];
-    ctx.move_to(x0, y0);
-    for &(x, y) in &stroke[1..] {
-        ctx.line_to(x, y);
+    let (p2, p3) = default_bezier_controls(stroke[0], stroke[1]);
+    stroke.push(p2);
+    stroke.push(p3);
+}
+
+/// Reflect `p` across the perpendicular bisector of the segment `p0`-`p1`:
+/// the tangential component (along the line) flips while the normal
+/// component (perpendicular to it) is kept, so `p0` and `p1` swap places.
+/// This reflection is its own inverse, which is what lets either control
+/// point drive the other in symmetric mode.
+fn mirror_across_perp_bisector(p0: Point, p1: Point, p: Point) -> Point {
+    let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0.0 {
+        return p;
     }
-    ctx.stroke();
+    let mid = ((p0.0 + p1.0) / 2.0, (p0.1 + p1.1) / 2.0);
+    let (vx, vy) = (p.0 - mid.0, p.1 - mid.1);
+    let t = (vx * dx + vy * dy) / len2;
+    (mid.0 + vx - 2.0 * t * dx, mid.1 + vy - 2.0 * t * dy)
+}
+
+/// Move Bezier control point `point_idx` (2 or 3) of `strokes[stroke_idx]`
+/// to `world`. In symmetric mode the opposite control point is updated to
+/// match, mirrored across the curve's perpendicular bisector.
+fn update_control_point(state: &mut AppState, stroke_idx: usize, point_idx: usize, world: Point) {
+    let symmetric = state.symmetric;
+    if let Some(stroke) = state.strokes.get_mut(stroke_idx) {
+        if stroke.len() != 4 {
+            return;
+        }
+        stroke[point_idx] = world;
+        if symmetric {
+            let (p0, p1) = (stroke[0], stroke[1]);
+            let mirrored = mirror_across_perp_bisector(p0, p1, world);
+            let other_idx = if point_idx == 2 { 3 } else { 2 };
+            stroke[other_idx] = mirrored;
+        }
+    }
+}
+
+/// Shortest distance from `p` to the segment `a`-`b`.
+fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
+}
+
+/// Find a Bezier control handle (`p2` or `p3`) under screen position `pos`,
+/// if any. Returns (stroke index, point index).
+fn hit_test_handle(state: &AppState, pos: Point) -> Option<(usize, usize)> {
+    for (i, stroke) in state.strokes.iter().enumerate() {
+        if stroke.len() != 4 {
+            continue;
+        }
+        for &point_idx in &[2usize, 3usize] {
+            let (wx, wy) = stroke[point_idx];
+            let (sx, sy) = state.view.world_to_screen(wx, wy);
+            if ((pos.0 - sx).powi(2) + (pos.1 - sy).powi(2)).sqrt() <= HANDLE_HIT_RADIUS_PX {
+                return Some((i, point_idx));
+            }
+        }
+    }
+    None
+}
+
+/// Find a straight-line stroke under screen position `pos`, if any. Curves
+/// are excluded — only finished straight lines can be click-converted.
+fn hit_test_line(state: &AppState, pos: Point) -> Option<usize> {
+    state.strokes.iter().position(|stroke| {
+        if stroke.len() != 2 {
+            return false;
+        }
+        let a = state.view.world_to_screen(stroke[0].0, stroke[0].1);
+        let b = state.view.world_to_screen(stroke[1].0, stroke[1].1);
+        dist_to_segment(pos, a, b) <= LINE_HIT_TOLERANCE_PX
+    })
+}
+
+/// Decide what a new press at `pos` does: grab a handle, mark a line as a
+/// click-to-convert candidate, or start drawing a new stroke.
+fn begin_primary_press(state: &mut AppState, pos: Point) {
+    if let Some(hit) = hit_test_handle(state, pos) {
+        state.dragging_handle = Some(hit);
+    } else if let Some(idx) = hit_test_line(state, pos) {
+        state.click_candidate = Some(idx);
+        state.press_pos = Some(pos);
+    } else {
+        state.current_stroke = Some(vec![state.view.screen_to_world(pos.0, pos.1)]);
+    }
+}
+
+/// Continue whatever `begin_primary_press` started. Returns whether a
+/// redraw is needed.
+fn continue_primary_press(state: &mut AppState, pos: Point) -> bool {
+    if let Some((stroke_idx, point_idx)) = state.dragging_handle {
+        let world = state.view.screen_to_world(pos.0, pos.1);
+        update_control_point(state, stroke_idx, point_idx, world);
+        true
+    } else if state.click_candidate.is_some() {
+        false
+    } else if let Some(stroke) = state.current_stroke.as_mut() {
+        let world = state.view.screen_to_world(pos.0, pos.1);
+        set_stroke_end(stroke, world);
+        true
+    } else {
+        false
+    }
 }
 
 /// Midpoint and separation distance of an exactly-two-finger touch gesture.
@@ -223,6 +434,20 @@ fn install_listeners(
         button.add_event_listener_with_callback("click", handler.as_ref().unchecked_ref())?;
         handler.forget();
     }
+    if let Some(checkbox) = window
+        .document()
+        .ok_or("no document")?
+        .get_element_by_id("symmetric-toggle")
+    {
+        let state = state.clone();
+        let checkbox = checkbox.dyn_into::<HtmlInputElement>()?;
+        let handler_checkbox = checkbox.clone();
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            state.borrow_mut().symmetric = handler_checkbox.checked();
+        });
+        checkbox.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref())?;
+        handler.forget();
+    }
     {
         let state = state.clone();
         let handler = Closure::<dyn FnMut()>::new(move || {
@@ -248,12 +473,15 @@ fn on_pointer_down(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
         match state.touch_points.len() {
             1 => {
                 state.drawing_pointer_id = Some(pointer_id);
-                state.current_stroke = Some(vec![state.view.screen_to_world(pos.0, pos.1)]);
+                begin_primary_press(&mut state, pos);
             }
             2 => {
                 // A second finger turns this into a pan/zoom gesture; any
-                // single-finger stroke in progress is abandoned.
+                // single-finger stroke or edit in progress is abandoned.
                 state.current_stroke = None;
+                state.click_candidate = None;
+                state.press_pos = None;
+                state.dragging_handle = None;
                 state.drawing_pointer_id = None;
                 state.gesture_prev = Some(gesture_state(&state.touch_points));
             }
@@ -263,7 +491,7 @@ fn on_pointer_down(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
         match event.button() {
             0 => {
                 state.drawing_pointer_id = Some(pointer_id);
-                state.current_stroke = Some(vec![state.view.screen_to_world(pos.0, pos.1)]);
+                begin_primary_press(&mut state, pos);
             }
             1 => {
                 state.pan_pointer_id = Some(pointer_id);
@@ -293,11 +521,7 @@ fn on_pointer_move(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
             state.gesture_prev = Some((mid, dist));
             dirty = true;
         } else if state.drawing_pointer_id == Some(pointer_id) {
-            let world = state.view.screen_to_world(pos.0, pos.1);
-            if let Some(stroke) = state.current_stroke.as_mut() {
-                set_stroke_end(stroke, world);
-                dirty = true;
-            }
+            dirty = continue_primary_press(&mut state, pos);
         }
     } else if state.pan_pointer_id == Some(pointer_id) {
         let (last_x, last_y) = state.last_pan_pos;
@@ -305,11 +529,7 @@ fn on_pointer_move(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
         state.last_pan_pos = pos;
         dirty = true;
     } else if state.drawing_pointer_id == Some(pointer_id) {
-        let world = state.view.screen_to_world(pos.0, pos.1);
-        if let Some(stroke) = state.current_stroke.as_mut() {
-            set_stroke_end(stroke, world);
-            dirty = true;
-        }
+        dirty = continue_primary_press(&mut state, pos);
     }
 
     if dirty {
@@ -319,6 +539,7 @@ fn on_pointer_move(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
 
 fn on_pointer_up(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
     let mut state = state.borrow_mut();
+    let pos = state.canvas_pos(&event);
     let pointer_id = event.pointer_id();
     let _ = state.canvas.release_pointer_capture(pointer_id);
 
@@ -329,7 +550,17 @@ fn on_pointer_up(state: &Rc<RefCell<AppState>>, event: PointerEvent) {
     }
     if state.drawing_pointer_id == Some(pointer_id) {
         state.drawing_pointer_id = None;
-        if let Some(stroke) = state.current_stroke.take() {
+        state.dragging_handle = None;
+        if let Some(idx) = state.click_candidate.take() {
+            let moved = state.press_pos.take().map_or(0.0, |(px, py)| {
+                ((pos.0 - px).powi(2) + (pos.1 - py).powi(2)).sqrt()
+            });
+            if moved <= CLICK_MOVE_THRESHOLD_PX {
+                if let Some(stroke) = state.strokes.get_mut(idx) {
+                    convert_to_bezier(stroke);
+                }
+            }
+        } else if let Some(stroke) = state.current_stroke.take() {
             if stroke.len() > 1 {
                 state.strokes.push(stroke);
             }
@@ -358,20 +589,36 @@ fn on_wheel(state: &Rc<RefCell<AppState>>, event: WheelEvent) {
 /// reasonable magnitude regardless of how zoomed-in the drawing was.
 const TIKZ_SCALE: f64 = 100.0;
 
-/// Render the straight-line strokes as TikZ `\draw` commands. The y axis is
-/// flipped because canvas coordinates grow downward while TikZ's grow
-/// upward.
+/// Render the strokes as TikZ `\draw` commands — a straight `--` for lines,
+/// a `.. controls .. and ..` Bezier for curves. The y axis is flipped
+/// because canvas coordinates grow downward while TikZ's grow upward.
 fn strokes_to_tikz(strokes: &[Stroke]) -> String {
     let mut tikz = String::from("\\begin{tikzpicture}\n");
     for stroke in strokes {
-        if let [(x0, y0), (x1, y1)] = stroke[..] {
-            tikz.push_str(&format!(
-                "  \\draw ({:.2},{:.2}) -- ({:.2},{:.2});\n",
-                x0 / TIKZ_SCALE,
-                -y0 / TIKZ_SCALE,
-                x1 / TIKZ_SCALE,
-                -y1 / TIKZ_SCALE,
-            ));
+        match stroke[..] {
+            [(x0, y0), (x1, y1)] => {
+                tikz.push_str(&format!(
+                    "  \\draw ({:.2},{:.2}) -- ({:.2},{:.2});\n",
+                    x0 / TIKZ_SCALE,
+                    -y0 / TIKZ_SCALE,
+                    x1 / TIKZ_SCALE,
+                    -y1 / TIKZ_SCALE,
+                ));
+            }
+            [(x0, y0), (x1, y1), (x2, y2), (x3, y3)] => {
+                tikz.push_str(&format!(
+                    "  \\draw ({:.2},{:.2}) .. controls ({:.2},{:.2}) and ({:.2},{:.2}) .. ({:.2},{:.2});\n",
+                    x0 / TIKZ_SCALE,
+                    -y0 / TIKZ_SCALE,
+                    x2 / TIKZ_SCALE,
+                    -y2 / TIKZ_SCALE,
+                    x3 / TIKZ_SCALE,
+                    -y3 / TIKZ_SCALE,
+                    x1 / TIKZ_SCALE,
+                    -y1 / TIKZ_SCALE,
+                ));
+            }
+            _ => {}
         }
     }
     tikz.push_str("\\end{tikzpicture}\n");

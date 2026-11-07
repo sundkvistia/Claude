@@ -21,6 +21,12 @@ impl View {
         ((sx - self.pan_x) / self.zoom, (sy - self.pan_y) / self.zoom)
     }
 
+    /// Inverse of `screen_to_world`: where a world point currently sits on
+    /// screen. Used to hit-test clicks against strokes stored in world space.
+    pub fn world_to_screen(&self, wx: f64, wy: f64) -> (f64, f64) {
+        (wx * self.zoom + self.pan_x, wy * self.zoom + self.pan_y)
+    }
+
     pub fn pan_by(&mut self, dx: f64, dy: f64) {
         self.pan_x += dx;
         self.pan_y += dy;
